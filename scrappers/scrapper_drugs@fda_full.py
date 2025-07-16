@@ -2,55 +2,42 @@ import asyncio
 from playwright.async_api import async_playwright
 import os
 import csv
+import re
 
 DOMAIN = "https://www.accessdata.fda.gov"
 BASE_URL = f"{DOMAIN}/scripts/cder/daf/index.cfm?event=browseByLetter.page&productLetter={{}}&ai=0"
 LETTERS = [chr(i) for i in range(ord('A'), ord('Z') + 1)]
 
-SAVE_DIR = os.path.join(os.getcwd(), "data/fda_downloads")
+SAVE_DIR = os.path.join(os.getcwd(), "fda_downloads")
 PDF_DIR = os.path.join(SAVE_DIR, "pdfs")
 CSV_FILE = os.path.join(SAVE_DIR, "fda_all_tables.csv")
 
 os.makedirs(PDF_DIR, exist_ok=True)
 
-async def extract_all_tables(page, drug_name, version, letter):
-    tables = await page.query_selector_all("table")
-    all_data = []
 
-    for i, table in enumerate(tables):
-        rows = await table.query_selector_all("tr")
-        for row in rows:
-            cells = await row.query_selector_all("th, td")
-            row_data = []
-            for cell in cells:
-                link = await cell.query_selector("a")
-                if link:
-                    href = await link.get_attribute("href")
-                    text = await link.inner_text()
-                    if href and href.endswith(".pdf"):
-                        full_url = href if href.startswith("http") else DOMAIN + href
-                        await download_pdf(page, full_url)
-                        row_data.append(f"{text} ({full_url})")
-                    else:
-                        row_data.append(text)
-                else:
-                    row_data.append(await cell.inner_text())
-            if row_data:
-                all_data.append([drug_name, version, letter, f"Table{i+1}"] + row_data)
-    print(all_data)
+def extract_appl_no_from_href(href: str) -> str:
+    match = re.search(r"ApplNo=(\d+)", href)
+    if match:
+        return match.group(1).zfill(6)
+    return "UNKNOWN"
 
-    return all_data
 
-async def download_pdf(page, url):
+def make_safe_folder_name(name):
+    return re.sub(r"[^\w\-\.]", "_", name)
+
+
+async def download_pdf(page, url, appl_no, drug_name):
     filename = os.path.basename(url.split("#")[0])
-    save_path = os.path.join(PDF_DIR, filename)
+    safe_name = make_safe_folder_name(drug_name)
+    drug_dir = os.path.join(PDF_DIR, f"{appl_no}_{safe_name}")
+    os.makedirs(drug_dir, exist_ok=True)
+    save_path = os.path.join(drug_dir, filename)
 
     if os.path.exists(save_path):
-        return  # skip if already downloaded
+        return  # already downloaded
 
     try:
         async with page.expect_download() as download_info:
-            # Simulate clicking a download using JS if needed
             await page.evaluate("""(url) => {
                 const a = document.createElement('a');
                 a.href = url;
@@ -66,13 +53,43 @@ async def download_pdf(page, url):
     except Exception as e:
         print(f"Failed to download PDF: {url} | {e}")
 
-async def extract_and_download_pdfs(page):
+
+async def extract_all_tables(page, drug_name, appl_no, version, letter):
+    tables = await page.query_selector_all("table")
+    all_data = []
+
+    for i, table in enumerate(tables):
+        rows = await table.query_selector_all("tr")
+        for row in rows:
+            cells = await row.query_selector_all("th, td")
+            row_data = []
+            for cell in cells:
+                link = await cell.query_selector("a")
+                if link:
+                    href = await link.get_attribute("href")
+                    text = await link.inner_text()
+                    if href and href.endswith(".pdf"):
+                        full_url = href if href.startswith("http") else DOMAIN + href
+                        await download_pdf(page, full_url, appl_no, drug_name)
+                        row_data.append(f"{text} ({full_url})")
+                    else:
+                        row_data.append(text)
+                else:
+                    row_data.append(await cell.inner_text())
+            if row_data:
+                all_data.append([drug_name, appl_no, version, letter, f"Table{i+1}"] + row_data)
+
+    return all_data
+
+
+async def extract_and_download_pdfs(page, appl_no, drug_name):
     anchors = await page.query_selector_all("a[href$='.pdf']")
     for anchor in anchors:
         href = await anchor.get_attribute("href")
         if href:
             full_url = href if href.startswith("http") else DOMAIN + href
-            await download_pdf(page, full_url)
+            await download_pdf(page, full_url, appl_no, drug_name)
+
 
 async def scrape_fda():
     all_data = []
@@ -102,17 +119,20 @@ async def scrape_fda():
                 if not href:
                     continue
 
+                appl_no = extract_appl_no_from_href(href)
+
                 overview_url = DOMAIN + href
-                print(f"\n>> {letter} {index+1}/{len(drug_links)}: {drug_name}")
+                print(f"\n>> {letter} {index+1}/{len(drug_links)}: {drug_name} ({appl_no})")
+
                 overview_page = await context.new_page()
                 await overview_page.goto(overview_url)
 
                 # Extract tables from overview
-                extracted = await extract_all_tables(overview_page, drug_name, "Overview", letter)
+                extracted = await extract_all_tables(overview_page, drug_name, appl_no, "Overview", letter)
                 all_data.extend(extracted)
 
                 # Download any non-table PDFs
-                await extract_and_download_pdfs(overview_page)
+                await extract_and_download_pdfs(overview_page, appl_no, drug_name)
 
                 # Try detail/versions
                 try:
@@ -130,10 +150,10 @@ async def scrape_fda():
                         detail_page = await context.new_page()
                         await detail_page.goto(detail_url)
 
-                        detail_data = await extract_all_tables(detail_page, drug_name, version_name, letter)
+                        detail_data = await extract_all_tables(detail_page, drug_name, appl_no, version_name, letter)
                         all_data.extend(detail_data)
 
-                        await extract_and_download_pdfs(detail_page)
+                        await extract_and_download_pdfs(detail_page, appl_no, drug_name)
                         await detail_page.close()
                 except:
                     print(f"  No detail links found for {drug_name}")
@@ -146,9 +166,10 @@ async def scrape_fda():
         os.makedirs(SAVE_DIR, exist_ok=True)
         with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(["DrugName", "Version", "Letter", "TableID"] +
-                            [f"Col{i+1}" for i in range(max(len(row) - 4 for row in all_data))])
+            writer.writerow(["DrugName", "ApplNo", "Version", "Letter", "TableID"] +
+                            [f"Col{i+1}" for i in range(max(len(row) - 5 for row in all_data))])
             writer.writerows(all_data)
+
 
 if __name__ == "__main__":
     asyncio.run(scrape_fda())
