@@ -3,6 +3,7 @@ from playwright.async_api import async_playwright
 import os
 import csv
 import re
+import aiohttp
 
 DOMAIN = "https://www.accessdata.fda.gov"
 BASE_URL = f"{DOMAIN}/scripts/cder/daf/index.cfm?event=browseByLetter.page&productLetter={{}}&ai=0"
@@ -83,12 +84,45 @@ async def extract_all_tables(page, drug_name, appl_no, version, letter):
 
 
 async def extract_and_download_pdfs(page, appl_no, drug_name):
-    anchors = await page.query_selector_all("a[href$='.pdf']")
-    for anchor in anchors:
-        href = await anchor.get_attribute("href")
-        if href:
-            full_url = href if href.startswith("http") else DOMAIN + href
-            await download_pdf(page, full_url, appl_no, drug_name)
+    print(f"Extracting PDFs for {drug_name} | Application: {appl_no}")
+    try:
+        links = await page.locator("a").all()
+        for anchor in links:
+            try:
+                text = (await anchor.inner_text()).strip().lower()
+                if "pdf" in text or ".pdf" in (await anchor.get_attribute("href") or ""):
+                    href = await anchor.get_attribute("href")
+
+                    if not href:
+                        continue
+
+                    # Normalize the URL
+                    if href.startswith("/"):
+                        href = f"https://www.fda.gov{href}"
+                    elif not href.startswith("http"):
+                        continue  # Skip malformed URLs
+
+                    filename = href.split("/")[-1]
+                    safe_name = f"{drug_name.replace(' ', '_')}_{appl_no}_{filename}"
+
+                    save_path = os.path.join("data", "fda_drugs", "pdfs", safe_name)
+
+                    # Skip if already downloaded
+                    if os.path.exists(save_path):
+                        continue
+
+                    print(f"📄 Downloading PDF: {href}")
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(href, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                            if response.status == 200:
+                                with open(save_path, "wb") as f:
+                                    f.write(await response.read())
+                            else:
+                                print(f"❌ Failed to download {href} | Status: {response.status}")
+            except Exception as e:
+                print(f"Error extracting/downloading individual PDF: {e}")
+    except Exception as e:
+        print(f"Error parsing PDF links for {drug_name} ({appl_no}): {e}")
 
 
 async def scrape_fda():
