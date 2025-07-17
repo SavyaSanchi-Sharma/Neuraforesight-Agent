@@ -5,7 +5,7 @@ import csv
 import re
 import pandas as pd
 import aiohttp
-
+import logging
 
 # --- Excel Setup ---
 EXCEL_PATH = "data/100Drugs.xlsx"
@@ -30,6 +30,17 @@ PDF_DIR = os.path.join(SAVE_DIR, "pdfs")
 CSV_FILE = os.path.join(SAVE_DIR, "fda_all_tables.csv")
 
 os.makedirs(PDF_DIR, exist_ok=True)
+
+# --- Logging Setup ---
+LOG_FILE = os.path.join(SAVE_DIR, "fda_scraper.log")
+os.makedirs(SAVE_DIR, exist_ok=True)
+logging.basicConfig(
+    filename=LOG_FILE,
+    filemode='a',
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 
 def extract_appl_no_from_href(href: str) -> str:
@@ -63,9 +74,9 @@ async def download_pdf(page, url, appl_no, drug_name):
             }""", url)
         download = await download_info.value
         await download.save_as(save_path)
-        print(f"Downloaded PDF: {filename}")
+        logger.info(f"Downloaded PDF: {filename}")
     except Exception as e:
-        print(f"Failed to download PDF: {url} | {e}")
+        logger.error(f"Failed to download PDF: {url} | {e}")
 
 
 async def extract_all_tables(page, drug_name, appl_no, version, letter):
@@ -97,7 +108,7 @@ async def extract_all_tables(page, drug_name, appl_no, version, letter):
 
 
 async def extract_and_download_pdfs(page, appl_no, drug_name):
-    print(f"Extracting PDFs for {drug_name} | Application: {appl_no}")
+    logger.info(f"Extracting PDFs for {drug_name} | Application: {appl_no}")
     try:
         links = await page.locator("a").all()
         for anchor in links:
@@ -109,33 +120,30 @@ async def extract_and_download_pdfs(page, appl_no, drug_name):
                     if not href:
                         continue
 
-                    # Normalize the URL
                     if href.startswith("/"):
                         href = f"https://www.fda.gov{href}"
                     elif not href.startswith("http"):
-                        continue  # Skip malformed URLs
+                        continue
 
                     filename = href.split("/")[-1]
                     safe_name = f"{drug_name.replace(' ', '_')}_{appl_no}_{filename}"
-
                     save_path = os.path.join("data", "fda_drugs", "pdfs", safe_name)
 
-                    # Skip if already downloaded
                     if os.path.exists(save_path):
                         continue
 
-                    print(f"📄 Downloading PDF: {href}")
+                    logger.info(f"Downloading PDF: {href}")
                     async with aiohttp.ClientSession() as session:
                         async with session.get(href, timeout=aiohttp.ClientTimeout(total=30)) as response:
                             if response.status == 200:
                                 with open(save_path, "wb") as f:
                                     f.write(await response.read())
                             else:
-                                print(f"Failed to download {href} | Status: {response.status}")
+                                logger.warning(f"Failed to download {href} | Status: {response.status}")
             except Exception as e:
-                print(f" Error extracting/downloading individual PDF: {e}")
+                logger.error(f"Error extracting/downloading individual PDF: {e}")
     except Exception as e:
-        print(f"Error parsing PDF links for {drug_name} ({appl_no}): {e}")
+        logger.error(f"Error parsing PDF links for {drug_name} ({appl_no}): {e}")
 
 
 async def scrape_fda():
@@ -148,17 +156,17 @@ async def scrape_fda():
 
         for letter in LETTERS:
             url = BASE_URL.format(letter)
-            print(f"\n--- Visiting letter '{letter}' page: {url}")
+            logger.info(f"\n--- Visiting letter '{letter}' page: {url}")
             await page.goto(url)
 
             try:
                 await page.wait_for_selector("table", timeout=5000)
             except:
-                print(f"No table found for letter {letter}")
+                logger.warning(f"No table found for letter {letter}")
                 continue
 
             drug_links = await page.query_selector_all("a[href*='event=overview.process']")
-            print(f"Found {len(drug_links)} drugs for letter '{letter}'")
+            logger.info(f"Found {len(drug_links)} drugs for letter '{letter}'")
 
             for index, link in enumerate(drug_links):
                 raw_name = await link.inner_text()
@@ -174,7 +182,7 @@ async def scrape_fda():
 
                 appl_no = extract_appl_no_from_href(href)
                 overview_url = DOMAIN + href
-                print(f"\n>> {letter} {index+1}/{len(drug_links)}: {cleaned_name} ({appl_no})")
+                logger.info(f">> {letter} {index+1}/{len(drug_links)}: {cleaned_name} ({appl_no})")
 
                 overview_page = await context.new_page()
                 await overview_page.goto(overview_url)
@@ -184,11 +192,10 @@ async def scrape_fda():
 
                 await extract_and_download_pdfs(overview_page, appl_no, cleaned_name)
 
-                # Try version links
                 try:
                     await overview_page.wait_for_selector("a[href*='event=drugDetails.process']", timeout=3000)
                     detail_links = await overview_page.query_selector_all("a[href*='event=drugDetails.process']")
-                    print(f"  Found {len(detail_links)} detail versions")
+                    logger.info(f"  Found {len(detail_links)} detail versions")
 
                     for detail in detail_links:
                         version_name = await detail.inner_text()
@@ -206,7 +213,7 @@ async def scrape_fda():
                         await extract_and_download_pdfs(detail_page, appl_no, cleaned_name)
                         await detail_page.close()
                 except:
-                    print(f"  No detail links found for {cleaned_name}")
+                    logger.warning(f"  No detail links found for {cleaned_name}")
 
                 await overview_page.close()
 
@@ -219,6 +226,9 @@ async def scrape_fda():
             writer.writerow(["DrugName", "ApplNo", "Version", "Letter", "TableID"] +
                             [f"Col{i+1}" for i in range(max(len(row) - 5 for row in all_data))])
             writer.writerows(all_data)
+        logger.info("Saved extracted data to CSV.")
+
+    logger.info("FDA scraping completed and saved.")
 
 
 if __name__ == "__main__":
