@@ -8,7 +8,7 @@ import aiohttp
 import logging
 
 # --- Excel Setup ---
-EXCEL_PATH = "data/100Drugs.xlsx"
+CSV_PATH = "data/drug_list.csv"
 
 def normalize_name(name: str) -> str:
     """Convert name to uppercase, remove parentheses and punctuation."""
@@ -17,7 +17,7 @@ def normalize_name(name: str) -> str:
     name = re.sub(r"[^\w\s]", "", name)  # remove punctuation
     return name.strip().upper()
 
-drug_df = pd.read_excel(EXCEL_PATH)
+drug_df = pd.read_csv(CSV_PATH)
 TARGET_DRUGS = set(drug_df["Drug Name"].astype(str).map(normalize_name))
 
 # --- Constants ---

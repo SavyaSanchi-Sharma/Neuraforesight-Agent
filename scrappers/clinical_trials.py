@@ -2,8 +2,7 @@ import pandas as pd
 import requests
 import time
 import csv
-
-df = pd.read_excel("data/100Drugs.xlsx")
+df = pd.read_csv("data/drug_list.csv")
 
 def fetch_studies(drug_name):
     base_url = "https://clinicaltrials.gov/api/v2/studies"
